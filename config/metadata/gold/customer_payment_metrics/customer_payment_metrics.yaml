@@ -1,0 +1,132 @@
+table_name: customer_payment_metrics
+layer: gold
+enabled: true
+priority: 1
+dependencies:
+  - payment_analytics.silver.invoice_details
+  - payment_analytics.silver.account_profiles
+
+source:
+  type: multi_source
+  tables:
+    - payment_analytics.silver.invoice_details
+    - payment_analytics.silver.account_profiles
+
+primary_keys:
+  - account_id
+
+target:
+  database: payment_analytics.gold
+  table: customer_payment_metrics
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/gold/customer_payment_metrics/
+  format: delta
+
+transformation:
+  type: aggregation
+  logic: |
+    WITH invoice_metrics AS (
+      SELECT 
+        account_id,
+        COUNT(DISTINCT invoice_id) as total_invoices,
+        SUM(total_retail) as total_revenue,
+        AVG(total_retail) as avg_invoice_value,
+        SUM(margin_amount) as total_margin,
+        AVG(margin_percent) as avg_margin_percent,
+        MIN(invoice_date) as first_invoice_date,
+        MAX(invoice_date) as last_invoice_date,
+        DATEDIFF(MAX(invoice_date), MIN(invoice_date)) as days_active,
+        COUNT(DISTINCT DATE_FORMAT(invoice_date, 'yyyy-MM')) as active_months
+      FROM payment_analytics.silver.invoice_details
+      GROUP BY account_id
+    ),
+    account_info AS (
+      SELECT 
+        account_id,
+        company_name,
+        company_state,
+        account_segment,
+        account_age_months
+      FROM payment_analytics.silver.account_profiles
+    )
+    SELECT 
+      a.account_id,
+      a.company_name,
+      a.company_state,
+      a.account_segment,
+      a.account_age_months,
+      COALESCE(i.total_invoices, 0) as total_invoices,
+      ROUND(COALESCE(i.total_revenue, 0), 2) as total_revenue,
+      ROUND(COALESCE(i.avg_invoice_value, 0), 2) as avg_invoice_value,
+      ROUND(COALESCE(i.total_margin, 0), 2) as total_margin,
+      ROUND(COALESCE(i.avg_margin_percent, 0), 2) as avg_margin_percent,
+      i.first_invoice_date,
+      i.last_invoice_date,
+      COALESCE(i.days_active, 0) as days_active,
+      COALESCE(i.active_months, 0) as active_months,
+      CASE 
+        WHEN i.total_invoices IS NULL THEN 'No Activity'
+        WHEN i.total_invoices = 1 THEN 'One-time'
+        WHEN i.total_invoices <= 5 THEN 'Sporadic'
+        WHEN i.total_invoices <= 20 THEN 'Regular'
+        ELSE 'Frequent'
+      END as payment_frequency,
+      ROUND(COALESCE(i.total_revenue * 1.2, 0), 2) as customer_lifetime_value,
+      ROUND(
+        CASE 
+          WHEN i.total_invoices IS NULL THEN 0.8
+          WHEN i.days_active = 0 THEN 0.5
+          WHEN i.avg_invoice_value < 100 THEN 0.7
+          WHEN i.total_invoices < 3 THEN 0.6
+          WHEN DATEDIFF(current_date(), i.last_invoice_date) > 180 THEN 0.75
+          WHEN DATEDIFF(current_date(), i.last_invoice_date) > 90 THEN 0.65
+          WHEN i.avg_margin_percent < 10 THEN 0.55
+          ELSE 0.3
+        END, 2
+      ) as risk_score,
+      CASE 
+        WHEN i.total_invoices IS NULL THEN 'Inactive'
+        WHEN ROUND(
+          CASE 
+            WHEN i.days_active = 0 THEN 0.5
+            WHEN i.avg_invoice_value < 100 THEN 0.7
+            WHEN i.total_invoices < 3 THEN 0.6
+            WHEN DATEDIFF(current_date(), i.last_invoice_date) > 90 THEN 0.65
+            ELSE 0.3
+          END, 2) >= 0.7 THEN 'High Risk'
+        WHEN ROUND(
+          CASE 
+            WHEN i.days_active = 0 THEN 0.5
+            WHEN i.avg_invoice_value < 100 THEN 0.7
+            WHEN i.total_invoices < 3 THEN 0.6
+            WHEN DATEDIFF(current_date(), i.last_invoice_date) > 90 THEN 0.65
+            ELSE 0.3
+          END, 2) >= 0.4 THEN 'Medium Risk'
+        ELSE 'Low Risk'
+      END as risk_category,
+      current_timestamp() as _last_updated
+    FROM account_info a
+    LEFT JOIN invoice_metrics i ON a.account_id = i.account_id
+
+keys:
+  partition_columns: []
+
+data_quality:
+  enabled: true
+  rules:
+    - name: revenue_validation
+      type: validation
+      expression: "total_revenue >= 0"
+      severity: error
+      action: reject
+      description: "Total revenue must be non-negative"
+    
+    - name: risk_score_range
+      type: validation
+      expression: "risk_score >= 0 AND risk_score <= 1"
+      severity: error
+      action: reject
+      description: "Risk score must be between 0 and 1"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true

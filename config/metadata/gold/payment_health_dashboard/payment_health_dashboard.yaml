@@ -1,0 +1,111 @@
+table_name: payment_health_dashboard
+layer: gold
+enabled: true
+priority: 3
+dependencies:
+  - payment_analytics.silver.invoice_details
+  - payment_analytics.gold.customer_payment_metrics
+
+source:
+  type: multi_source
+  tables:
+    - payment_analytics.silver.invoice_details
+    - payment_analytics.gold.customer_payment_metrics
+
+primary_keys:
+  - metric_date
+
+target:
+  database: payment_analytics.gold
+  table: payment_health_dashboard
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/gold/payment_health_dashboard/
+  format: delta
+
+transformation:
+  type: aggregation
+  logic: |
+    WITH payment_aging AS (
+      SELECT 
+        account_id,
+        invoice_id,
+        invoice_date,
+        total_retail,
+        DATEDIFF(current_date(), invoice_date) as days_outstanding
+      FROM payment_analytics.silver.invoice_details
+    ),
+    aging_buckets AS (
+      SELECT 
+        current_date() as metric_date,
+        COUNT(DISTINCT invoice_id) as total_invoices,
+        COUNT(DISTINCT account_id) as total_accounts,
+        SUM(total_retail) as total_outstanding,
+        SUM(CASE WHEN days_outstanding <= 30 THEN total_retail ELSE 0 END) as current_amount,
+        SUM(CASE WHEN days_outstanding > 30 AND days_outstanding <= 60 THEN total_retail ELSE 0 END) as overdue_30_60_days,
+        SUM(CASE WHEN days_outstanding > 60 AND days_outstanding <= 90 THEN total_retail ELSE 0 END) as overdue_60_90_days,
+        SUM(CASE WHEN days_outstanding > 90 THEN total_retail ELSE 0 END) as overdue_90_plus_days,
+        SUM(CASE WHEN days_outstanding > 30 THEN total_retail ELSE 0 END) as total_overdue,
+        AVG(days_outstanding) as avg_days_outstanding,
+        MAX(days_outstanding) as max_days_outstanding,
+        COUNT(DISTINCT CASE WHEN days_outstanding > 90 THEN account_id END) as accounts_90_plus_overdue
+      FROM payment_aging
+      WHERE days_outstanding > 0
+    ),
+    account_health AS (
+      SELECT 
+        COUNT(DISTINCT account_id) as total_customers,
+        COUNT(DISTINCT CASE WHEN risk_category = 'High Risk' THEN account_id END) as high_risk_accounts,
+        COUNT(DISTINCT CASE WHEN risk_category = 'Medium Risk' THEN account_id END) as medium_risk_accounts,
+        COUNT(DISTINCT CASE WHEN risk_category = 'Low Risk' THEN account_id END) as low_risk_accounts,
+        COUNT(DISTINCT CASE WHEN risk_category = 'Inactive' THEN account_id END) as inactive_accounts,
+        SUM(total_revenue) as total_customer_revenue,
+        AVG(risk_score) as avg_customer_risk_score
+      FROM payment_analytics.gold.customer_payment_metrics
+    )
+    SELECT 
+      ab.metric_date,
+      ab.total_invoices,
+      ab.total_accounts,
+      ROUND(ab.total_outstanding, 2) as total_outstanding,
+      ROUND(ab.current_amount, 2) as current_amount,
+      ROUND(ab.overdue_30_60_days, 2) as overdue_30_60_days,
+      ROUND(ab.overdue_60_90_days, 2) as overdue_60_90_days,
+      ROUND(ab.overdue_90_plus_days, 2) as overdue_90_plus_days,
+      ROUND(ab.total_overdue, 2) as total_overdue,
+      ROUND(ab.avg_days_outstanding, 2) as avg_days_outstanding,
+      ab.max_days_outstanding,
+      ab.accounts_90_plus_overdue,
+      ah.total_customers,
+      ah.high_risk_accounts,
+      ah.medium_risk_accounts,
+      ah.low_risk_accounts,
+      ah.inactive_accounts,
+      ROUND(ah.total_customer_revenue, 2) as total_customer_revenue,
+      ROUND(ah.avg_customer_risk_score, 2) as avg_customer_risk_score,
+      ROUND((ab.current_amount) / NULLIF(ab.total_outstanding, 0) * 100, 2) as current_percent,
+      ROUND((ab.total_overdue) / NULLIF(ab.total_outstanding, 0) * 100, 2) as overdue_percent,
+      ROUND((ab.total_outstanding - ab.total_overdue) / NULLIF(ab.total_outstanding, 0) * 100, 2) as collection_efficiency,
+      CASE 
+        WHEN ROUND((ab.total_overdue) / NULLIF(ab.total_outstanding, 0) * 100, 2) > 30 THEN 'Critical'
+        WHEN ROUND((ab.total_overdue) / NULLIF(ab.total_outstanding, 0) * 100, 2) > 15 THEN 'Warning'
+        ELSE 'Healthy'
+      END as health_status,
+      current_timestamp() as _last_updated
+    FROM aging_buckets ab
+    CROSS JOIN account_health ah
+
+keys:
+  partition_columns: []
+
+data_quality:
+  enabled: true
+  rules:
+    - name: positive_amounts
+      type: validation
+      expression: "total_outstanding >= 0"
+      severity: error
+      action: reject
+      description: "Outstanding amount must be non-negative"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true

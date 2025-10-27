@@ -1,0 +1,92 @@
+table_name: skus
+layer: bronze
+enabled: true
+priority: 1
+dependencies: []  # No dependencies - can run first
+
+source:
+  format: csv
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/landing/skus/
+  options:
+    header: "true"
+    inferSchema: "false"
+    delimiter: ","
+    encoding: "UTF-8"
+
+target:
+  database: payment_analytics.bronze
+  table: skus
+  path: s3://pdatabricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/bronze/skus/
+  format: delta
+
+schema:
+  primary_keys:
+    - item_id
+  
+  columns:
+    item_id:
+      type: string
+      nullable: false
+      description: "Unique SKU identifier"
+    item_name:
+      type: string
+      nullable: true
+      description: "Product name"
+    item_description:
+      type: string
+      nullable: true
+      description: "Product description"
+    item_cost_price:
+      type: decimal(10,2)
+      nullable: false
+      description: "Cost price"
+    item_retail_price:
+      type: decimal(10,2)
+      nullable: false
+      description: "Retail price"
+
+keys:
+  partition_columns:
+    - day
+    - month
+    - year
+
+scd:
+  enabled: true
+  type: 2
+  compare_columns:
+    - item_name
+    - item_cost_price
+    - item_retail_price
+  effective_date_column: _effective_start_date
+  end_date_column: _effective_end_date
+  current_flag_column: _is_current
+
+data_quality:
+  enabled: true
+  rules:
+    - name: item_id_not_null
+      type: completeness
+      columns: [item_id]
+      severity: error
+      action: reject
+      description: "Item ID must not be null"
+    
+    - name: price_validation
+      type: validation
+      expression: "item_retail_price >= item_cost_price"
+      severity: warning
+      action: flag
+      description: "Retail price should be >= cost price"
+    
+    - name: prices_positive
+      type: validation
+      expression: "item_cost_price > 0 AND item_retail_price > 0"
+      severity: error
+      action: reject
+      description: "Prices must be positive"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true
+  log_sample_records: 5

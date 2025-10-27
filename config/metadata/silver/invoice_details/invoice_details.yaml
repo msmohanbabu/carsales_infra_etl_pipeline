@@ -1,0 +1,100 @@
+table_name: invoice_details
+layer: silver
+enabled: true
+priority: 1
+dependencies:
+  - bronze.invoices
+  - bronze.invoice_line_items
+  - bronze.skus
+
+source:
+  type: multi_source
+  tables:
+    - payment_analytics.bronze.invoices
+    - payment_analytics.bronze.invoice_line_items
+    - payment_analytics.bronze.skus
+
+primary_keys:
+  - invoice_id
+
+target:
+  database: payment_analytics.silver
+  table: invoice_details
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/silver/invoice_details/
+  format: delta
+
+transformation:
+  type: aggregate_join
+  logic: |
+    WITH current_invoices AS (
+      SELECT *
+      FROM payment_analytics.bronze.invoices
+      WHERE _is_current = true
+    ),
+    current_line_items AS (
+      SELECT *
+      FROM payment_analytics.bronze.invoice_line_items
+      WHERE _is_current = true
+    ),
+    current_skus AS (
+      SELECT *
+      FROM payment_analytics.bronze.skus
+      WHERE _is_current = true
+    ),
+    invoice_aggregates AS (
+      SELECT 
+        li.invoice_id,
+        COUNT(DISTINCT li.item_id) as line_item_count,
+        SUM(li.quantity) as total_quantity,
+        SUM(li.quantity * s.item_cost_price) as total_cost,
+        SUM(li.quantity * s.item_retail_price) as total_retail
+      FROM current_line_items li
+      INNER JOIN current_skus s ON li.item_id = s.item_id
+      GROUP BY li.invoice_id
+    )
+    SELECT 
+      i.invoice_id,
+      i.account_id,
+      i.date_issued as invoice_date,
+      agg.line_item_count,
+      agg.total_quantity,
+      ROUND(agg.total_cost, 2) as total_cost,
+      ROUND(agg.total_retail, 2) as total_retail,
+      ROUND(agg.total_retail - agg.total_cost, 2) as margin_amount,
+      ROUND((agg.total_retail - agg.total_cost) / NULLIF(agg.total_retail, 0) * 100, 2) as margin_percent,
+      current_timestamp() as _processing_timestamp,
+      1.0 as _data_quality_score
+    FROM current_invoices i
+    INNER JOIN invoice_aggregates agg ON i.invoice_id = agg.invoice_id
+    WHERE agg.total_retail > 0
+
+keys:
+  partition_columns: []
+
+data_quality:
+  enabled: true
+  rules:
+    - name: margin_validation
+      type: validation
+      expression: "total_retail >= total_cost"
+      severity: error
+      action: reject
+      description: "Total retail must be >= total cost"
+    
+    - name: positive_amounts
+      type: validation
+      expression: "total_cost > 0 AND total_retail > 0"
+      severity: error
+      action: reject
+      description: "Amounts must be positive"
+    
+    - name: reasonable_margin
+      type: validation
+      expression: "margin_percent >= -100 AND margin_percent <= 500"
+      severity: warning
+      action: flag
+      description: "Margin should be reasonable"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true

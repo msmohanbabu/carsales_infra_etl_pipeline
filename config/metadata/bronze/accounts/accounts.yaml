@@ -1,0 +1,104 @@
+table_name: accounts
+layer: bronze
+enabled: true
+priority: 1
+dependencies: []  # No dependencies - can run first
+
+source:
+  format: csv
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/landing/accounts/
+  options:
+    header: "true"
+    inferSchema: "false"
+    delimiter: ","
+    encoding: "UTF-8"
+    multiLine: true     
+    escape: '"' 
+
+target:
+  database: payment_analytics.bronze
+  table: accounts
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/bronze/accounts/
+  format: delta
+
+schema:
+  primary_keys:
+    - account_id
+  
+  columns:
+    account_id:
+      type: int
+      nullable: false
+      description: "Unique account identifier"
+    company_name:
+      type: string
+      nullable: false
+      description: "Company name"
+    company_address:
+      type: string
+      nullable: true
+      description: "Company address"
+    contact_person:
+      type: string
+      nullable: true
+      description: "Contact person name"
+    contact_phone:
+      type: string
+      nullable: true
+      description: "Contact phone number"
+    gender:
+      type: string
+      nullable: true
+      description: "Contact gender"
+    joining_date:
+      type: date
+      nullable: false
+      format: "d/MM/yyyy" 
+      description: "Account creation date"
+
+keys:
+  partition_columns:
+    - day
+    - month
+    - year
+
+scd:
+  enabled: true
+  type: 2
+  compare_columns:
+    - company_name
+    - company_address
+    - contact_person
+    - contact_phone
+  effective_date_column: _effective_start_date
+  end_date_column: _effective_end_date
+  current_flag_column: _is_current
+
+data_quality:
+  enabled: true
+  rules:
+    - name: account_required_fields
+      type: completeness
+      columns: [account_id, company_name]
+      severity: error
+      action: reject
+      description: "Account ID and company name are required"
+    
+    - name: valid_joining_date
+      type: validation
+      expression: "joining_date <= current_date()"
+      severity: error
+      action: reject
+      description: "Joining date cannot be in future"
+    
+    - name: phone_format
+      type: validation
+      expression: "contact_phone IS NULL OR LENGTH(REGEXP_REPLACE(contact_phone, '[^0-9]', '')) >= 10"
+      severity: warning
+      action: flag
+      description: "Phone should have at least 10 digits"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true
+  log_sample_records: 5

@@ -1,0 +1,84 @@
+table_name: product_catalog
+layer: silver
+enabled: true
+priority: 1
+dependencies:
+  - payment_analytics.bronze.skus
+
+source:
+  type: single_source
+  tables:
+    - payment_analytics.bronze.skus
+
+target:
+  database: payment_analytics.silver
+  table: product_catalog
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/silver/product_catalog/
+  format: delta
+
+primary_keys:
+  - item_id
+
+transformation:
+  type: cleansing
+  logic: |
+    WITH current_skus AS (
+      SELECT *
+      FROM payment_analytics.bronze.skus
+      WHERE _is_current = true
+    )
+    SELECT 
+      item_id,
+      TRIM(item_name) as product_name,
+      TRIM(item_description) as product_description,
+      CASE
+        WHEN LOWER(item_name) LIKE '%widget%' THEN 'Widgets'
+        WHEN LOWER(item_name) LIKE '%gadget%' THEN 'Gadgets'
+        WHEN LOWER(item_name) LIKE '%tool%' THEN 'Tools'
+        WHEN LOWER(item_name) LIKE '%part%' THEN 'Parts'
+        ELSE 'General'
+      END as product_category,
+      item_cost_price as cost_price,
+      item_retail_price as retail_price,
+      ROUND(item_retail_price - item_cost_price, 2) as markup_amount,
+      ROUND((item_retail_price - item_cost_price) / NULLIF(item_cost_price, 0) * 100, 2) as markup_percent,
+      CASE 
+        WHEN item_retail_price < 50 THEN 'Low'
+        WHEN item_retail_price < 200 THEN 'Mid'
+        WHEN item_retail_price < 1000 THEN 'High'
+        ELSE 'Premium'
+      END as price_tier,
+      current_timestamp() as _processing_timestamp
+    FROM current_skus
+    WHERE item_cost_price > 0 AND item_retail_price > 0
+
+keys:
+  partition_columns: []
+
+data_quality:
+  enabled: true
+  rules:
+    - name: positive_markup
+      type: validation
+      expression: "markup_amount >= 0"
+      severity: warning
+      action: flag
+      description: "Markup should be positive"
+    
+    - name: valid_prices
+      type: validation
+      expression: "cost_price > 0 AND retail_price > 0"
+      severity: error
+      action: reject
+      description: "Prices must be positive"
+    
+    - name: reasonable_markup
+      type: validation
+      expression: "markup_percent >= -50 AND markup_percent <= 1000"
+      severity: warning
+      action: flag
+      description: "Markup should be reasonable"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true

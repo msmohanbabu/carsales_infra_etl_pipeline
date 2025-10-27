@@ -1,0 +1,77 @@
+table_name: account_profiles
+layer: silver
+enabled: true
+priority: 1
+dependencies:
+  - payment_analytics.bronze.accounts
+
+primary_keys: 
+  - account_id
+
+source:
+  type: single_source
+  tables:
+    - payment_analytics.bronze.accounts
+
+target:
+  database: payment_analytics.silver
+  table: account_profiles
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/silver/account_profiles/
+  format: delta
+
+transformation:
+  type: cleansing
+  logic: |
+    WITH current_accounts AS (
+      SELECT *
+      FROM payment_analytics.bronze.accounts
+      WHERE _is_current = true
+    )
+    SELECT 
+      account_id,
+      TRIM(UPPER(company_name)) as company_name,
+      company_address,
+      REGEXP_EXTRACT(company_address, '([A-Z]{2,3})\\s*\\d{4}', 1) as company_state,
+      TRIM(contact_person) as contact_full_name,
+      REGEXP_REPLACE(contact_phone, '[^0-9]', '') as contact_phone_clean,
+      gender,
+      joining_date,
+      CAST(MONTHS_BETWEEN(current_date(), joining_date) AS INTEGER) as account_age_months,
+      CASE 
+        WHEN MONTHS_BETWEEN(current_date(), joining_date) < 6 THEN 'New'
+        WHEN MONTHS_BETWEEN(current_date(), joining_date) < 24 THEN 'Active'
+        ELSE 'Mature'
+      END as account_segment,
+      current_timestamp() as _processing_timestamp
+    FROM current_accounts
+
+keys:
+  partition_columns: []
+
+data_quality:
+  enabled: true
+  rules:
+    - name: account_id_not_null
+      type: completeness
+      columns: [account_id]
+      severity: error
+      action: reject
+      description: "Account ID must not be null"
+    
+    - name: valid_phone
+      type: validation
+      expression: "contact_phone_clean IS NULL OR LENGTH(contact_phone_clean) >= 10"
+      severity: warning
+      action: flag
+      description: "Phone should have at least 10 digits"
+    
+    - name: valid_segment
+      type: validation
+      expression: "account_segment IN ('New', 'Active', 'Mature')"
+      severity: error
+      action: reject
+      description: "Account segment must be valid"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true

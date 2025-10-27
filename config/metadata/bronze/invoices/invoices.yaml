@@ -1,0 +1,84 @@
+table_name: invoices
+layer: bronze
+enabled: true
+priority: 1
+dependencies: []  # No dependencies - can run first
+
+source:
+  format: csv
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/landing/invoices/
+  options:
+    header: "true"
+    inferSchema: "false"
+    delimiter: ","
+    encoding: "UTF-8"
+
+target:
+  database: payment_analytics.bronze
+  table: invoices
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/bronze/invoices/
+  format: delta
+
+schema:
+  primary_keys:
+    - invoice_id
+  
+  columns:
+    invoice_id:
+      type: int
+      nullable: false
+      description: "Unique invoice identifier"
+    account_id:
+      type: int
+      nullable: false
+      description: "Reference to account"
+    date_issued:
+      type: date
+      nullable: false
+      format: "yyyy-MM-dd"
+      description: "Invoice issue date"
+
+keys:
+  partition_columns:
+    - day
+    - month
+    - year
+
+scd:
+  enabled: true
+  type: 2
+  compare_columns:
+    - account_id
+    - date_issued
+  effective_date_column: _effective_start_date
+  end_date_column: _effective_end_date
+  current_flag_column: _is_current
+
+data_quality:
+  enabled: true
+  rules:
+    - name: invoice_id_not_null
+      type: completeness
+      columns: [invoice_id]
+      severity: error
+      action: reject
+      description: "Invoice ID must not be null"
+    
+    - name: valid_date
+      type: validation
+      expression: "date_issued IS NOT NULL AND date_issued <= current_date()"
+      severity: error
+      action: reject
+      description: "Invoice date must be valid and not in future"
+    
+    - name: valid_account
+      type: completeness
+      columns: [account_id]
+      severity: error
+      action: reject
+      description: "Account ID must not be null"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true
+  log_sample_records: 5

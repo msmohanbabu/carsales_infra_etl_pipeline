@@ -1,0 +1,96 @@
+table_name: payment_trends_monthly
+layer: gold
+enabled: true
+priority: 2
+dependencies:
+  - payment_analytics.silver.invoice_details
+
+source:
+  type: single_source
+  tables:
+    - payment_analytics.silver.invoice_details
+
+target:
+  database: payment_analytics.gold
+  table: payment_trends_monthly
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/gold/payment_trends_monthly/
+  format: delta
+
+transformation:
+  type: aggregation
+  logic: |
+    WITH monthly_metrics AS (
+      SELECT 
+        DATE_FORMAT(invoice_date, 'yyyy-MM') as year_month,
+        YEAR(invoice_date) as year,
+        MONTH(invoice_date) as month,
+        COUNT(DISTINCT invoice_id) as total_invoices,
+        COUNT(DISTINCT account_id) as unique_customers,
+        SUM(total_retail) as total_revenue,
+        SUM(total_cost) as total_cost,
+        SUM(margin_amount) as total_margin,
+        AVG(total_retail) as avg_invoice_value,
+        AVG(margin_percent) as avg_margin_percent,
+        MIN(total_retail) as min_invoice_value,
+        MAX(total_retail) as max_invoice_value
+      FROM payment_analytics.silver.invoice_details
+      GROUP BY DATE_FORMAT(invoice_date, 'yyyy-MM'), YEAR(invoice_date), MONTH(invoice_date)
+    ),
+    growth_metrics AS (
+      SELECT 
+        year_month,
+        year,
+        month,
+        total_invoices,
+        unique_customers,
+        total_revenue,
+        total_cost,
+        total_margin,
+        avg_invoice_value,
+        avg_margin_percent,
+        min_invoice_value,
+        max_invoice_value,
+        LAG(total_revenue, 1) OVER (ORDER BY year_month) as prev_month_revenue,
+        LAG(total_revenue, 12) OVER (ORDER BY year_month) as prev_year_revenue,
+        LAG(unique_customers, 1) OVER (ORDER BY year_month) as prev_month_customers,
+        LAG(unique_customers, 12) OVER (ORDER BY year_month) as prev_year_customers
+      FROM monthly_metrics
+    )
+    SELECT 
+      year_month,
+      year,
+      month,
+      total_invoices,
+      unique_customers,
+      ROUND(total_revenue, 2) as total_revenue,
+      ROUND(total_cost, 2) as total_cost,
+      ROUND(total_margin, 2) as total_margin,
+      ROUND(avg_invoice_value, 2) as avg_invoice_value,
+      ROUND(avg_margin_percent, 2) as avg_margin_percent,
+      ROUND(min_invoice_value, 2) as min_invoice_value,
+      ROUND(max_invoice_value, 2) as max_invoice_value,
+      ROUND((total_revenue - prev_year_revenue) / NULLIF(prev_year_revenue, 0) * 100, 2) as yoy_growth_percent,
+      ROUND((total_revenue - prev_month_revenue) / NULLIF(prev_month_revenue, 0) * 100, 2) as mom_growth_percent,
+      ROUND((unique_customers - prev_year_customers) / NULLIF(prev_year_customers, 0) * 100, 2) as yoy_customer_growth,
+      ROUND((unique_customers - prev_month_customers) / NULLIF(prev_month_customers, 0) * 100, 2) as mom_customer_growth,
+      ROUND(total_revenue / NULLIF(unique_customers, 0), 2) as revenue_per_customer,
+      current_timestamp() as _last_updated
+    FROM growth_metrics
+    ORDER BY year_month DESC
+
+keys:
+  partition_columns: []
+
+data_quality:
+  enabled: true
+  rules:
+    - name: positive_values
+      type: validation
+      expression: "total_revenue >= 0 AND total_cost >= 0"
+      severity: error
+      action: reject
+      description: "Revenue and cost must be non-negative"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true

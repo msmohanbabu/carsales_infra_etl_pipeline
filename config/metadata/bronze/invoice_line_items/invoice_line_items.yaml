@@ -1,0 +1,86 @@
+table_name: invoice_line_items
+layer: bronze
+enabled: true
+priority: 2
+dependencies:
+  - bronze.invoices  # Must wait for invoices to complete first
+
+source:
+  format: csv
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/landing/invoice_line_items/
+  options:
+    header: "true"
+    inferSchema: "false"
+    delimiter: ","
+    encoding: "UTF-8"
+
+target:
+  database: payment_analytics.bronze
+  table: invoice_line_items
+  path: s3://databricks-workspace-stack-5df43-bucket/unity-catalog/4227733217617218/bronze/invoice_line_items/
+  format: delta
+
+schema:
+  primary_keys:
+    - invoice_id
+    - item_id
+  
+  columns:
+    invoice_id:
+      type: int
+      nullable: false
+      description: "Reference to invoice"
+    item_id:
+      type: string
+      nullable: false
+      description: "Reference to SKU"
+    quantity:
+      type: integer
+      nullable: false
+      description: "Quantity ordered"
+
+keys:
+  partition_columns:
+    - day
+    - month
+    - year
+
+scd:
+  enabled: true
+  type: 2
+  compare_columns:
+    - invoice_id
+    - item_id
+    - quantity
+  effective_date_column: _effective_start_date
+  end_date_column: _effective_end_date
+  current_flag_column: _is_current
+
+data_quality:
+  enabled: true
+  rules:
+    - name: line_item_keys_not_null
+      type: completeness
+      columns: [invoice_id, item_id]
+      severity: error
+      action: reject
+      description: "Invoice and Item IDs must not be null"
+    
+    - name: quantity_positive
+      type: validation
+      expression: "quantity > 0"
+      severity: warning
+      action: flag
+      description: "Quantity should be positive"
+    
+    - name: quantity_reasonable
+      type: validation
+      expression: "quantity <= 10000"
+      severity: warning
+      action: flag
+      description: "Quantity should be reasonable"
+
+monitoring:
+  alert_on_failure: true
+  track_metrics: true
+  log_sample_records: 5

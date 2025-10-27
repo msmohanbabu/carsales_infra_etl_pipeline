@@ -1,0 +1,1 @@
+{"Modules":[{"Key":"","Source":"","Dir":"."},{"Key":"databricks","Source":"../../modules/databricks","Dir":"../../modules/databricks"},{"Key":"iam","Source":"../../modules/iam","Dir":"../../modules/iam"},{"Key":"mwaa","Source":"../../modules/mwaa","Dir":"../../modules/mwaa"},{"Key":"s3","Source":"../../modules/s3","Dir":"../../modules/s3"}]}
